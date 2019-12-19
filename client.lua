@@ -8,18 +8,22 @@ local updates_per_sec = 30
 local rate = 1/updates_per_sec
 local tick = 0
 
-local client_port = 22222
+local broadcast_port = 11111
+local client_port = 11113
 
 local udp = false
 
 local password = "doom"
 
-local promotions = {}
+local valid_addresses = {}
 
 client.load = function()
   udp = socket.udp()
   udp:settimeout(0)
   udp:setsockname("0.0.0.0", client_port)
+  assert(udp:setoption("broadcast", true))
+
+  client.promote()
 end
 
 client.update = function(dt)
@@ -32,7 +36,7 @@ client.update = function(dt)
 end
 
 client.draw = function()
-  for i, v in ipairs(promotions) do
+  for i, v in ipairs(valid_addresses) do
     love.graphics.print(v.ip..":"..tostring(v.port), 0, i*12)
   end
 end
@@ -40,6 +44,11 @@ end
 client.keypressed = function(key)
   if key == "r" then
     client.refresh()
+  else
+    local num = tonumber(key)
+    if num then
+      local address = valid_addresses
+      client.connect(address.ip, address.port)
   end
 end
 
@@ -48,29 +57,26 @@ client.quit = function()
   udp = false
 end
 
+client.promote = function()
+  udp:sendto(password, "255.255.255.255", broadcast_port)
+end
+
 client.listen = function()
-  local data, ip, port
+  local data
   repeat
     data, ip, port = udp:receivefrom()
-    if data == password then
-      if not client.promotion_received(ip, port) then
-        table.insert(promotions, {ip = ip, port = port})
-      end
+    if data then
+      table.insert(valid_addresses, {ip = ip, port = data})
     end
   until not data
 end
 
-client.promotion_received = function(ip, port)
-  for i, v in ipairs(promotions) do
-    if v.ip == ip and v.port == port then
-      return true
-    end
-  end
-  return false
+client.refresh = function()
+  valid_addresses = {}
+  client.promote()
 end
 
-client.refresh = function()
-  promotions = {}
+client.connect = function(ip, port)
 end
 
 return client
