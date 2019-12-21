@@ -1,5 +1,6 @@
 local enet = require "enet"
 local socket = require "socket"
+local bitser = require "bitser"
 
 local network = {
   server = {},
@@ -24,8 +25,13 @@ local password = "doom"
 
 local valid_addresses = {}
 
+local peers = {}
+
+local callbacks = {}
+
 network.load = function()
   udp = socket.udp()
+  callbacks = {}
 end
 
 network.server.start = function()
@@ -58,27 +64,51 @@ end
 
 network.server.update_enet = function(dt)
   local event = host:service()
-  if event and event.type == "receive" then
+  while event do
+    if event.type == "connect" then
+      table.insert(peers, event.peer)
+      network.activate_callback("connect", nil, event.peer)
+    elseif event.type == "disconnect" then
+      for i, v in ipairs(peers) do
+        if v == event.peer then
+          table.remove(peers, i)
+        end
+      end
+      network.activate_callback("disconnect", nil, event.peer)
+    else
+      network.activate_callback(network.unformat(event.data), event.peer)
+    end
+
+    event = host:service()
   end
 end
 
 network.server.listen = function()
-  local data, ip, port
-  repeat
-    data, ip, port = udp:receivefrom()
-    if data and data == password then
+  local data, ip, port = udp:receivefrom()
+  while data do
+    if data == password then
       udp:sendto(server_port, ip, port)
     end
-  until not data
+    data, ip, port = udp:receivefrom()
+  end
 end
 
 network.server.send = function(event, data, peer)
   peer:send(network.format(event, data))
 end
 
-network.server.send_to_all = function(event, data)
+network.server.send_all = function(event, data)
   host:broadcast(network.format(event, data))
 end
+
+network.server.send_except = function(event, data)
+  local formatted_data = network.format(event, data)
+  for i, v in ipairs(peers) do
+    peer:send(formatted_data)
+  end
+end
+
+
 
 network.client.start = function()
   status = "disconnected"
@@ -114,10 +144,16 @@ end
 
 network.client.update_enet = function(dt)
   local event = host:service()
-  if event then
+  while event do
     if event.type == "connect" then
       status = "connected"
+      network.activate_callback("connect")
+    elseif event.type == "disconnect" then
+      network.activate_callback("disconnect")
+    else
+      network.activate_callback(network.unformat(event.data))
     end
+    event = host:service()
   end
 end
 
@@ -139,13 +175,11 @@ network.client.promote = function()
 end
 
 network.client.listen = function()
-  local data
-  repeat
+  local data, ip, port = udp:receivefrom()
+  while data do
+    table.insert(valid_addresses, {ip = ip, port = data})
     data, ip, port = udp:receivefrom()
-    if data then
-      table.insert(valid_addresses, {ip = ip, port = data})
-    end
-  until not data
+  end
 end
 
 network.client.refresh = function()
@@ -174,10 +208,46 @@ network.client.get_status = function()
   return status
 end
 
+network.client.send = function(event, data)
+  server:send(network.format(event, data))
+end
+
 
 
 network.format = function(event, data)
-  return {event, data}
+  return bitser.dumps({event, data})
+end
+
+network.unformat = function(data)
+  return unpack(bitser.loads(data))
+end
+
+network.add_callback = function(event, func)
+  if callbacks[event] then
+    table.insert(callbacks[event], func)
+  else
+    callbacks[event] = {func}
+  end
+end
+
+network.remove_callback = function(event, func)
+  if callbacks[event] then
+    for i, v in ipairs(callbacks[event]) do
+      if v == func then
+        table.remove(callbacks[event], i)
+        return true
+      end
+    end
+  end
+  return false
+end
+
+network.activate_callback = function(event, data, peer)
+  if callbacks[event] then
+    for i, v in ipairs(callbacks[event]) do
+      v(data, peer)
+    end
+  end
 end
 
 return network
