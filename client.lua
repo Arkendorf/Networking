@@ -15,7 +15,7 @@ client.draw = function()
   love.graphics.print(network.client.get_status(), 100, 0)
   if status == "disconnected" then
     for i, v in ipairs(network.client.get_addresses()) do
-      love.graphics.print(tostring(i)..". "..v.ip..":"..tostring(v.port), 0, i*12)
+      love.graphics.print(tostring(i)..". "..v, 0, i*12)
     end
   end
 end
@@ -28,7 +28,7 @@ client.keypressed = function(key)
     if num then
       local address = network.client.get_addresses()[num]
       if address then
-        network.client.connect(address.ip, address.port)
+        network.client.connect(address)
       end
     end
   end
