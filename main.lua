@@ -32,6 +32,8 @@ love.keypressed = function(key)
       mode = "client"
       client.load()
     end
+  elseif mode == "server" then
+    server.keypressed(key)
   elseif mode == "client" then
     client.keypressed(key)
   end

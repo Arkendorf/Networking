@@ -30,26 +30,24 @@ local password = "doom"
 -- Callback information
 -- The functions listed in callback are called when an incoming event matches their key
 -- Keys allows users to specify what incoming information will be received, so keys can be stripped when sent and readded when received
--- Strictness determines whether an event is a one-time occurance, or a continuous stream of data
+-- lenience determines whether an event is a one-time occurance, or a continuous stream of data
 local callbacks = {}
 local keys = {}
-local strictness = {}
+local lenience = {}
 
 -- The list of queued messages to send during the next update
 local queue = {}
 
+-- Whether or not the server or client is active
+local active = false
 
-
--- Creates the initial udp socket and clears callback information
+-- Creates the initial udp socket
 -- Returns true if the udp socket is successfully created, false if otherwise
 network.load = function()
   -- Create the socket
   udp = socket.udp()
   if udp then
-    -- Clear callback information
-    callbacks = {}
-    keys = {}
-    strictness = {}
+    active = true
 
     return true
   else
@@ -144,30 +142,30 @@ end
 -- When it is received, if the client and server have the same keys, it will be converted back to {x = 27, y = 15}
 -- If no table is passed to the function or if the length of the table is less than zero, the keys for that event will be reset
 network.set_keys = function(event, key_table)
-  if keytable and #key_table > 0 then
+  if key_table and #key_table > 0 then
     keys[event] = key_table
   else
     keys[event] = nil
   end
 end
 
--- Set the strictness of an event
--- If an event is strict, it will remain in the queue and always be sent
--- If an event is not strict, it may be removed from the queue before being sent
--- Information about specific, one-time occurances should be strict
--- However, information that is constantly being updated and sent should not be, such as coordinates
-network.set_strictness = function(event, bool)
-  strictness[event] = bool
+-- Set the lenience of an event
+-- If an event is lenient, it may be removed from the queue before being sent
+-- If an event is not lenient,it will remain in the queue and always be sent
+-- Information that is constantly being updated and sent should lenient
+-- However, information about specific, one-time occurances should not be, such as coordinates
+network.set_lenience = function(event, bool)
+  lenience[event] = bool
 end
 
--- Remove all non-strict items from the queue
+-- Remove all lenient items from the queue
 -- Information in the queue is only sent x times a second, determined by the updates_per_sec variable
 -- However, the queue is cleaned every time the server or client is updated, regardless of whether or not they have actually sent out the information
 network.clean_queue = function()
   for i = #queue, 1, -1 do
     local v = queue[i]
-    -- If the item in the queue is not strict, remove it
-    if not v.strict then
+    -- If the item in the queue is lenient, remove it
+    if v.lenient then
       table.remove(queue, i)
     end
   end
@@ -214,58 +212,76 @@ end
 -- Cleans the queue
 -- Returns true if the server has been updated, and false if not
 network.server.update = function(dt)
-  tick = tick + dt
-  if tick > rate then
-    tick = tick - rate
+  if active then
+    tick = tick + dt
+    if tick > rate then
+      tick = tick - rate
 
-    network.server.listen()
+      network.server.listen()
 
-    network.server.listen_enet()
+      network.server.listen_enet()
 
-    network.server.send_queue()
+      network.server.send_queue()
 
-    return true
+      return true
+    end
+    network.clean_queue()
   end
-  network.clean_queue()
 
   return false
 end
 
 -- Quits the server
 -- Shuts down the udp socket, as well as the enet host
+-- Attempts to disconnect all peers
 network.server.quit = function()
-  udp:close()
-  udp = false
+  if active then
+    udp:close()
+    udp = false
 
-  host:flush()
-  host:destroy()
-  host = false
+    -- disconnect all peers
+    for i, peer in ipairs(peers) do
+      peer:disconnect()
+    end
+
+    host:flush()
+    host:destroy()
+    host = false
+
+    active = false
+  end
 end
 
 -- Updates the enet portion of the server
 -- Listens for events, and activates the associated callbacks
 network.server.listen_enet = function()
-  local event = host:service()
-  -- Keep looping until no more events register
-  while event do
-    -- Determine the type of event and activate the proper callback
-    if event.type == "connect" then
-      -- if a new peer has connected, add them to the list
-      table.insert(peers, event.peer)
-      network.activate_callback("connect", nil, event.peer)
-    elseif event.type == "disconnect" then
-      -- If a peer has disconnected, remove them from the list
-      for i, v in ipairs(peers) do
-        if v == event.peer then
-          table.remove(peers, i)
+  if active then
+    local event = host:service()
+    -- Keep looping until no more events register
+    while event do
+      -- Determine the type of event and activate the proper callback
+      if event.type == "connect" then
+        -- if a new peer has connected, add them to the list
+        table.insert(peers, event.peer)
+        network.activate_callback("connect", nil, event.peer)
+      elseif event.type == "disconnect" then
+        -- If a peer has disconnected, remove them from the list
+        for i, v in ipairs(peers) do
+          if v == event.peer then
+            table.remove(peers, i)
+          end
         end
+        network.activate_callback("disconnect", nil, event.peer)
+      else
+        local type, data = network.unformat(event.data)
+        network.activate_callback(type, data, event.peer)
       end
-      network.activate_callback("disconnect", nil, event.peer)
-    else
-      network.activate_callback(network.unformat(event.data), event.peer)
+      -- Make sure enet host hasn't been shut down
+      if not host then
+        break
+      end
+      event = host:service()
     end
-
-    event = host:service()
   end
 end
 
@@ -273,14 +289,16 @@ end
 -- Receives incoming data, and sends the proper responses
 -- If it receives a broadcast from a potential client, its sends them the server's address
 network.server.listen = function()
-  local data, ip, port = udp:receivefrom()
-  -- Keep looping until there is no more data to receive
-  while data do
-    -- If the potential client has sent the right password, send them the server's address
-    if data == password then
-      udp:sendto(address, ip, port)
+  if active then
+    local data, ip, port = udp:receivefrom()
+    -- Keep looping until there is no more data to receive
+    while data do
+      -- If the potential client has sent the right password, send them the server's address
+      if data == password then
+        udp:sendto(address, ip, port)
+      end
+      data, ip, port = udp:receivefrom()
     end
-    data, ip, port = udp:receivefrom()
   end
 end
 
@@ -308,40 +326,44 @@ end
 
 -- Send out all the information in the queue
 network.server.send_queue = function()
-  for i = #queue, 1, -1 do
-    local v = queue[i]
-    if v.type == 1 then
-      -- Send to one peer
-      v.peer:send(v.data)
+  if active then
+    for i = #queue, 1, -1 do
+      local v = queue[i]
+      if v.type == 1 then
+        -- Send to one peer
+        v.peer:send(v.data)
 
-    elseif v.type == 2 then
-      -- Send to all peers
-      host:broadcast(v.data)
+      elseif v.type == 2 then
+        -- Send to all peers
+        host:broadcast(v.data)
 
-    elseif v.type == 3 then
-      -- Send to all but one peer
-      for j, w in ipairs(peers) do
-        w:send(v.data)
+      elseif v.type == 3 then
+        -- Send to all but one peer
+        for j, peer in ipairs(peers) do
+          if peer ~= v.peer then
+            peer:send(v.data)
+          end
+        end
       end
-    end
 
-    table.remove(queue, i)
+      table.remove(queue, i)
+    end
   end
 end
 
 -- Queue an event to be sent to a single peer
 network.server.queue = function(event, data, peer)
-  table.insert(queue, {type = 1, data = network.format(event, data), strict = strictness[event], peer = peer})
+  table.insert(queue, {type = 1, data = network.format(event, data), lenient = lenience[event], peer = peer})
 end
 
 -- Queue an event to be sent to all peers
 network.server.queue_all = function(event, data)
-  table.insert(queue, {type = 2, data = network.format(event, data), strict = strictness[event]})
+  table.insert(queue, {type = 2, data = network.format(event, data), lenient = lenience[event]})
 end
 
 -- Queue an event to be sent to all but one peers
-network.server.queue_except = function(event, data)
-  table.insert(queue, {type = 3, data = network.format(event, data), strict = strictness[event]})
+network.server.queue_except = function(event, data, peer)
+  table.insert(queue, {type = 3, data = network.format(event, data), lenient = lenience[event], peer = peer})
 end
 
 
@@ -364,6 +386,8 @@ network.client.start = function(port)
   -- Set the default status of the client
   status = "disconnected"
 
+  valid_addresses = {}
+
   -- Create the udp socket object
   if network.load() then
     -- If the socket is successfully created, adjust its settings
@@ -383,21 +407,23 @@ end
 -- Cleans the queue
 -- Returns true if the client has been updated, and false if not
 network.client.update = function(dt)
-  tick = tick + dt
-  if tick > rate then
-    tick = tick - rate
+  if active then
+    tick = tick + dt
+    if tick > rate then
+      tick = tick - rate
 
-    if status == "disconnected" then
-      network.client.listen()
-    else
-      network.client.listen_enet()
+      if status == "disconnected" then
+        network.client.listen()
+      else
+        network.client.listen_enet()
 
-      network.client.send_queue()
+        network.client.send_queue()
+      end
+
+      return true
     end
-
-    return true
+    network.clean_queue()
   end
-  network.clean_queue()
 
   return false
 end
@@ -406,29 +432,54 @@ end
 -- Shuts down the udp socket if it is still active
 -- Shuts down the enet host if it is active
 network.client.quit = function()
-  if status == "disconnected" then
-    network.client.close_udp()
-  else
-    network.client.close_enet()
+  if active then
+    if status == "disconnected" then
+      network.client.close_udp()
+    else
+      network.client.close_enet()
+    end
   end
+
+  active = false
+end
+
+-- if the client is connected to a server, they are disconnected from it
+-- Restarts the udp socket broadcast for local servers
+-- Returns true if disconnect is possible, false if not
+network.client.disconnect = function()
+  if status ~= "disconnected" then
+    network.client.close_enet()
+
+    status = "disconnected"
+    network.client.start(client_port)
+
+    return true
+  end
+  return false
 end
 
 -- Updates the enet portion of the client
 -- Listens for events, and activates the associated callbacks
 network.client.listen_enet = function()
-  local event = host:service()
-  -- Keep looping until no more events register
-  while event do
-    -- Determine the type of event and activate the proper callback
-    if event.type == "connect" then
-      status = "connected"
-      network.activate_callback("connect")
-    elseif event.type == "disconnect" then
-      network.activate_callback("disconnect")
-    else
-      network.activate_callback(network.unformat(event.data))
+  if active then
+    local event = host:service()
+    -- Keep looping until no more events register
+    while event do
+      -- Determine the type of event and activate the proper callback
+      if event.type == "connect" then
+        status = "connected"
+        network.activate_callback("connect")
+      elseif event.type == "disconnect" then
+        network.activate_callback("disconnect")
+      else
+        network.activate_callback(network.unformat(event.data))
+      end
+      -- Make sure enet host hasn't been shut down
+      if not host then
+        break
+      end
+      event = host:service()
     end
-    event = host:service()
   end
 end
 
@@ -457,10 +508,12 @@ end
 -- Receives incoming data
 -- If it receives data from a server, it adds that server's ip to the list of valid ips on the LAN
 network.client.listen = function()
-  local data, ip, port = udp:receivefrom()
-  while data do
-    table.insert(valid_addresses, data)
-    data, ip, port = udp:receivefrom()
+  if active then
+    local data, ip, port = udp:receivefrom()
+    while data do
+      table.insert(valid_addresses, data)
+      data, ip, port = udp:receivefrom()
+    end
   end
 end
 
@@ -506,17 +559,19 @@ end
 
 -- Send out all the information in the queue
 network.client.send_queue = function()
-  for i = #queue, 1, -1 do
-    local v = queue[i]
-    server:send(v.data)
+  if active then
+    for i = #queue, 1, -1 do
+      local v = queue[i]
+      server:send(v.data)
 
-    table.remove(queue, i)
+      table.remove(queue, i)
+    end
   end
 end
 
 -- Queue an event to be sent to the server
 network.client.queue = function(event, data)
-  table.insert(queue, {data = network.format(event, data), strict = strictness[event]})
+  table.insert(queue, {data = network.format(event, data), lenient = lenience[event]})
 end
 
 
